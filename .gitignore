@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.DS_Store
+.venv/
+.claude/
+
+# 실제 등기사항전부증명서 PDF — 제3자(소유주) 실명·주민번호 앞자리 포함, 공개 저장소에 올리면 안 됨
+*등기사항전부증명서*.pdf
+
+# CatBoost 학습 시 자동 생성되는 로그 (Phase 5 모델비교 부산물, 재현 불필요)
+catboost_info/
