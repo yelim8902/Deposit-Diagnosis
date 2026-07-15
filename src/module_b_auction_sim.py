@@ -6,6 +6,10 @@
   실거래 표본에서 "소액임차인 기준 이하 보증금 비율(p_small)"을 구해
   n_prior * p_small 세대가 최우선변제 대상이라고 근사한다.
 - 낙찰가율은 경기도 연립·다세대 평균(config.py 주석 참고)으로 근사 — 단독/다가구 전용 통계 아님.
+- 조세채권(체납 국세·지방세, 특히 당해세)은 근저당보다도 우선순위가 높을 수 있는데,
+  이 정보(납세증명서)도 확정일자와 같은 이유로 임대인 동의가 있어야 계약 시점에만 확인
+  가능해 자동조회가 안 된다(주택임대차보호법 제3조의7). --mortgage처럼 사용자가 직접
+  확인한 값을 tax_arrears_won으로 수동 입력받는다(기본값 0 = 확인된 체납 없음).
 """
 
 import numpy as np
@@ -45,6 +49,7 @@ def simulate_recovery(
     region_class=TARGET_BUILDING_REGION_CLASS,
     n_sim=10000,
     seed=None,
+    tax_arrears_won=0,
 ):
     rng = np.random.default_rng(seed)
     region = _region_repayment_params(region_class)
@@ -63,7 +68,7 @@ def simulate_recovery(
 
     max_repayment_total = np.minimum(count_small * max_repayment_per_unit, winning_bid * 0.5)
 
-    distributable = winning_bid - auction_cost - max_repayment_total - mortgage_won - priority_won
+    distributable = winning_bid - auction_cost - tax_arrears_won - max_repayment_total - mortgage_won - priority_won
     distributable = np.clip(distributable, 0, None)
 
     my_recovery = np.clip(distributable, 0, my_deposit_won)
@@ -74,10 +79,23 @@ def summarize(recovery_won, my_deposit_won):
     full = np.isclose(recovery_won, my_deposit_won, rtol=0.01)
     zero = recovery_won <= (my_deposit_won * 0.01)
     partial = ~full & ~zero
+
+    # 시나리오별 회수율(percentile) — 단일 확률/평균 대신 "보수적/기준/낙관적" 구간으로 제시.
+    # p10/p50/p90은 임의 기준이 아니라 10,000회 몬테카를로 결과의 실제 분위수.
+    conservative_won = float(np.percentile(recovery_won, 10))
+    base_won = float(np.percentile(recovery_won, 50))
+    optimistic_won = float(np.percentile(recovery_won, 90))
+
     return {
         "full_recovery_pct": float(full.mean() * 100),
         "partial_recovery_pct": float(partial.mean() * 100),
         "total_loss_pct": float(zero.mean() * 100),
         "expected_recovery_won": float(recovery_won.mean()),
         "partial_recovery_avg_won": float(recovery_won[partial].mean()) if partial.any() else 0.0,
+        "conservative_recovery_won": conservative_won,
+        "conservative_recovery_pct_of_deposit": conservative_won / my_deposit_won * 100,
+        "base_recovery_won": base_won,
+        "base_recovery_pct_of_deposit": base_won / my_deposit_won * 100,
+        "optimistic_recovery_won": optimistic_won,
+        "optimistic_recovery_pct_of_deposit": optimistic_won / my_deposit_won * 100,
     }

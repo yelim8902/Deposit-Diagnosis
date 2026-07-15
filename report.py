@@ -19,6 +19,11 @@
   으로 그 부분만 고정값으로 대체할 수 있다(나머지 세대만 추정). 다만 확정일자 부여현황 열람은
   주택임대차보호법 제3조의6에 따라 임대인 동의가 필요해 API 자동조회는 불가능하고(계약 전 접근이
   제한적인 경우가 많음), 수동 입력만 지원한다 — 이 접근성 문제 자체가 A모듈이 필요한 이유이기도 하다.
+- [B] 국세·지방세 체납액(조세채권)은 --tax-arrears-won으로 수동 입력받는다. 당해세 등은 근저당보다도
+  우선순위가 높을 수 있어 회수액에서 최우선으로 차감하지만, 이 정보(납세증명서)도 확정일자와 같은
+  이유로 임대인 동의가 있어야 계약 시점에만 확인 가능해(주택임대차보호법 제3조의7) 자동조회는 불가능하다.
+- [B] 회수 결과는 단일 확률/평균 대신 10,000회 몬테카를로 분포의 p10/p50/p90을 "보수적/기준/낙관적"
+  시나리오로 제시한다(conservative_recovery_won/base_recovery_won/optimistic_recovery_won).
 """
 
 import argparse
@@ -182,6 +187,9 @@ def parse_args():
     p.add_argument("--known-priority-deposit-won", type=int, default=0,
                     help="--known-tenants만큼의 실제 확인된 선순위 보증금 총액(원). "
                          "이 금액은 추정이 아니라 실측값으로 고정 반영되고, 나머지 세대만 몬테카를로 시뮬레이션한다")
+    p.add_argument("--tax-arrears-won", type=int, default=0,
+                    help="임대인 국세·지방세 체납액(원) — 납세증명서로 직접 확인한 값(원, 등기부처럼 자동조회 불가). "
+                         "당해세 등은 근저당보다도 우선순위가 높을 수 있어 경매 회수액에서 우선 차감된다")
     p.add_argument("--n-sim", type=int, default=10000)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--json", action="store_true", help="사람이 읽는 텍스트 대신 구조화된 JSON을 stdout에 출력")
@@ -278,6 +286,7 @@ def main():
         small_tenant_ratio=small_ratio,
         n_sim=args.n_sim,
         seed=args.seed,
+        tax_arrears_won=args.tax_arrears_won,
     )
     b_summary = summarize_b(recovery, args.my_deposit)
 
@@ -363,6 +372,7 @@ def build_result_dict(building, n_units, areas, area_is_fallback, dong_expanded,
             "market_price_source": market_price_source,
             "known_tenants": args.known_tenants,
             "known_priority_deposit_won": args.known_priority_deposit_won,
+            "tax_arrears_won": args.tax_arrears_won,
         },
     }
 
@@ -557,6 +567,12 @@ def print_report(building, n_units, areas, area_is_fallback, dong_expanded,
     print(f"[사고(경매) 발생을 가정했을 때] 보증금 회수 예상   {_man(b_summary['expected_recovery_won'])} / {_man(args.my_deposit)}원")
     print(f"  전액회수 {b_summary['full_recovery_pct']:.1f}% / 일부회수 {b_summary['partial_recovery_pct']:.1f}% "
           f"/ 전액손실 {b_summary['total_loss_pct']:.1f}%  (※ 경매까지 갈 확률 자체는 위 {c_result['accident_probability']*100:.1f}%)")
+    print(f"  시나리오별 회수율(10,000회 시뮬레이션 분위수) — "
+          f"보수적 {b_summary['conservative_recovery_pct_of_deposit']:.0f}% / "
+          f"기준 {b_summary['base_recovery_pct_of_deposit']:.0f}% / "
+          f"낙관적 {b_summary['optimistic_recovery_pct_of_deposit']:.0f}%")
+    if args.tax_arrears_won > 0:
+        print(f"  ※ 임대인 국세·지방세 체납 {_man(args.tax_arrears_won)}원을 우선 차감해 반영(당해세는 근저당보다도 우선순위가 높을 수 있음)")
     print("─" * 60)
     print(f"기대손실                        {_man(loss)}원")
     print("━" * 60)
@@ -567,7 +583,7 @@ def print_report(building, n_units, areas, area_is_fallback, dong_expanded,
 
     print("\n" + "=" * 60)
     price_note = "자동추정(매매 실거래 API)" if market_price_source == "auto_trade_api" else "사용자 직접입력"
-    print(f"한계: 근저당은 사용자 입력값(등기부 미연동), 시세는 {price_note}({_man(market_price_won)}원).")
+    print(f"한계: 근저당·국세체납은 사용자 입력값(등기부·납세증명서 미연동), 시세는 {price_note}({_man(market_price_won)}원).")
     print("낙찰가율은 경기 연립·다세대 평균치로 근사, 사고확률은 학습된 분류기가 아닌 규칙기반")
     print("스코어링입니다.")
     if is_multi_household:

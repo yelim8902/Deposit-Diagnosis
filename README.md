@@ -176,6 +176,7 @@ python3 report.py \
 | `--market-price` | 아니오 | 자동추정(매매 실거래 API) | 생략하면 자동 추정, 실패 시(표본 부족 등) 에러 발생 → 그때 직접 입력 |
 | `--known-tenants` | 아니오 | `0` | 확정일자 부여현황 등으로 직접 확인한 선순위 임차인 수(관측된 하한). API 자동조회 불가(임대인 동의 필요) — 수동 입력만 지원 |
 | `--known-priority-deposit-won` | 아니오 | `0` | `--known-tenants`만큼의 실측 확인된 선순위 보증금 총액(원). 고정값으로 반영되고 나머지 세대만 몬테카를로 추정 |
+| `--tax-arrears-won` | 아니오 | `0` | 임대인 국세·지방세 체납액(원) — 납세증명서로 직접 확인한 값. 등기부처럼 자동조회 불가(임대인 동의 필요), 당해세는 근저당보다 우선순위가 높을 수 있어 회수액에서 우선 차감 |
 | `--n-sim` | 아니오 | `10000` | 몬테카를로 시뮬레이션 횟수 |
 | `--seed` | 아니오 | `42` | 랜덤 시드 |
 | `--json` | 아니오 | (미지정 시 텍스트) | 켜면 사람이 읽는 텍스트 대신 아래 스키마의 JSON을 출력 |
@@ -229,7 +230,13 @@ python3 report.py \
     "partial_recovery_pct": 11.9,
     "total_loss_pct": 85.8,
     "expected_recovery_won": 3890000,
-    "partial_recovery_avg_won": 12300000
+    "partial_recovery_avg_won": 12300000,
+    "conservative_recovery_won": 0,        // p10 — 10,000회 시뮬레이션 하위 10% 분위수
+    "conservative_recovery_pct_of_deposit": 0.0,
+    "base_recovery_won": 0,                // p50 (중앙값)
+    "base_recovery_pct_of_deposit": 0.0,
+    "optimistic_recovery_won": 5000000,     // p90
+    "optimistic_recovery_pct_of_deposit": 100.0
   },
 
   "module_d": {                          // [D] 기대손실
@@ -249,7 +256,8 @@ python3 report.py \
     "market_price_won": 510000000,
     "market_price_source": "auto_trade_api",  // "auto_trade_api" 또는 "manual"
     "known_tenants": 0,                  // 확정일자 부여현황 등으로 실측 확인한 선순위 임차인 수 (기본 0)
-    "known_priority_deposit_won": 0      // 그 세대들의 실측 확인된 보증금 총액 (기본 0)
+    "known_priority_deposit_won": 0,     // 그 세대들의 실측 확인된 보증금 총액 (기본 0)
+    "tax_arrears_won": 0                 // 납세증명서로 확인한 임대인 국세·지방세 체납액 (기본 0)
   }
 }
 ```
@@ -267,6 +275,7 @@ python3 report.py \
 - ✅ **종합의견(AI 요약) 완료** — `OPENAI_API_KEY` 설정 시 OpenAI(`gpt-4o-mini`) 실호출로 자연어 종합의견 생성, 미설정/호출 실패 시 규칙 기반 문장 조립으로 자동 폴백 (숫자는 항상 계산된 값만 사용, LLM이 지어내지 않도록 프롬프트에 명시)
 - ✅ **참고 치안정보(CCTV) 추가 완료** — 행안부 CCTV 표준데이터(수원시, 사용자가 직접 다운로드한 파일 기반) 연동, 법정동명으로 필터링해 설치개소·카메라대수를 참고정보로 표시
 - ✅ **A모듈 확정일자 수동 override 완료** — `--known-tenants`/`--known-priority-deposit-won`으로 확정일자 부여현황 등 실측 확인값을 고정 반영하고 나머지 세대만 몬테카를로 추정. 확정일자 부여현황은 주택임대차보호법 제3조의6상 임대인 동의가 필요해 API 자동조회가 불가능(계약 전 접근 제한적)하므로 수동 입력만 지원 — 이 접근성 한계 자체가 A모듈의 존재 이유이기도 함
+- ✅ **B모듈 조세채권 반영 + 시나리오별 회수율 완료** — `--tax-arrears-won`(국세·지방세 체납액, 확정일자와 같은 이유로 자동조회 불가)을 회수 공식에 최우선 차감 항목으로 추가. 단일 확률/평균 대신 10,000회 몬테카를로 분포의 p10/p50/p90을 "보수적/기준/낙관적" 시나리오로 제시하도록 `module_b_auction_sim.summarize()` 확장
 
 **아직 남은 것 (향후 과제)**:
 - C모듈 PU Learning 실제 학습 (HUG 명단 127명 주소매칭 불가 문제 미해결)
