@@ -52,11 +52,22 @@ def _jeonse_ratio_multiplier(jeonse_ratio):
     return 0.8
 
 
-def score(mortgage_won, priority_deposit_mean_won, my_deposit_won, market_price_won):
+# 압류/가압류/신탁 가중치 — 논문에 없는 휴리스틱(등기부 PDF 자동추출 기능 추가로 신설).
+# 압류·가압류는 이미 채권자가 해당 부동산을 대상으로 강제집행 절차에 들어갔다는 뜻이라
+# 매우 강한 위험 신호로 보고 배수를 크게 잡았다. 신탁은 명의자(수탁자)와 실질적 처분권자가
+# 분리돼 있어 보증금 우선순위 판단이 복잡해지는 경우가 많아 중간 정도로 잡았다.
+ATTACHMENT_MULTIPLIER = 5.0
+TRUST_MULTIPLIER = 2.0
+
+
+def score(mortgage_won, priority_deposit_mean_won, my_deposit_won, market_price_won,
+          has_attachment=False, has_provisional_attachment=False, has_trust=False):
     """
     반환: dict(real_debt_ratio, jeonse_ratio, accident_probability)
     accident_probability는 HUG_NATIONAL_ACCIDENT_RATE 대비 상대위험을 곱한 근사치이며,
     상한 60%로 클리핑한다(무한정 발산 방지).
+    has_attachment/has_provisional_attachment/has_trust는 등기부 을구의 압류·가압류·신탁
+    여부(수동 입력 또는 src/registry_parser.py의 LLM 추출 결과)로, 있으면 위험배수를 곱한다.
     """
     if market_price_won <= 0:
         raise ValueError("market_price_won은 0보다 커야 함")
@@ -66,6 +77,10 @@ def score(mortgage_won, priority_deposit_mean_won, my_deposit_won, market_price_
     jeonse_ratio = my_deposit_won / market_price_won
 
     multiplier = _debt_ratio_multiplier(real_debt_ratio) * _jeonse_ratio_multiplier(jeonse_ratio)
+    if has_attachment or has_provisional_attachment:
+        multiplier *= ATTACHMENT_MULTIPLIER
+    if has_trust:
+        multiplier *= TRUST_MULTIPLIER
 
     probability = min(HUG_NATIONAL_ACCIDENT_RATE * multiplier, 0.60)
 
@@ -75,4 +90,7 @@ def score(mortgage_won, priority_deposit_mean_won, my_deposit_won, market_price_
         "jeonse_ratio": jeonse_ratio,
         "risk_multiplier": multiplier,
         "accident_probability": probability,
+        "has_attachment": has_attachment,
+        "has_provisional_attachment": has_provisional_attachment,
+        "has_trust": has_trust,
     }

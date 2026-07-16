@@ -419,3 +419,29 @@ python3 report.py --my-deposit <내보증금_원> --mortgage <근저당_원> --m
 - 조세채권 0원(기본) vs 3,000만원 입력 비교: 회수 예상 68만원→28만원, 전액회수 12.8%→5.2%로 하락, "임대인 국세·지방세 체납 3,000만원을 우선 차감해 반영" 안내 문구 정상 출력.
 - 시나리오 회수율: 500만원 소액 보증금 케이스(우만동 39-7, 사고확률 85%대 전액손실 비중 높음)에서 보수적/기준 0%, 낙관적 100%로 출력 — 실제 분포 모양(대부분 전액손실, 일부만 전액회수)과 일치. 5,000만원 구분등기(아파트) 케이스에서는 보수적/기준/낙관적 전부 100%로 정상 출력(근저당 낮고 A모듈 자체가 미적용).
 - 다가구·구분등기 두 경로 모두 회귀 테스트 통과, JSON 출력에 새 필드 정상 포함 확인.
+
+---
+
+# 등기부 PDF 자동분석(`--registry-pdf`) 추가 (2026-07-16)
+
+### 배경
+이전 라운드에서 보류했던 "권리위험 자동 추출"을 이번에 구현. 사용자가 "PDF를 OpenAI가 직접 읽는지" 물었을 때(당시엔 아니오 — 종합의견 LLM은 이미 계산된 숫자만 받음) 확인했던 구조를, 실제로 PDF를 읽는 별도 기능으로 확장한 것. `--mortgage` 수동 입력을 완전히 대체하는 건 아니고 선택지 하나를 추가하는 형태(둘 중 하나 필수).
+
+### PII 처리 결정
+등기부 PDF에는 실소유자 실명·주민등록번호 앞자리가 포함돼 있어, 이 텍스트를 OpenAI로 전송하는 게 맞는지 사용자에게 직접 확인(AskUserQuestion) — "레닥션 후 전송" 선택. `src/registry_parser.py`의 `redact_pii()`가 정규식(`[가-힣]{2,5}\s+\d{6}-\*+`, 실제 PDF에서 관찰된 "이름  생년월일6자리-마스킹7자리" 형식)으로 이름+주민번호 조합을 제거한 뒤에만 OpenAI로 전송한다. 표준 형식만 커버하는 정규식이라 완벽하지 않을 수 있음을 문서화.
+
+### 한 일
+1. `pypdf` 의존성 추가(`requirements.txt`) — PDF 텍스트 추출용. 실제 등기부 PDF로 테스트해보니 스캔본이 아니라 텍스트 레이어가 있는 PDF라 OCR 없이도 깨끗하게 추출됨.
+2. `src/registry_parser.py` 신규: `extract_text()`(pypdf) → `redact_pii()`(정규식 레닥션) → `extract_registry_info()`(OpenAI `gpt-4o-mini`, JSON mode로 구조화 추출: `mortgage_won, has_attachment, has_provisional_attachment, has_trust, ownership_transfer_count, notes`).
+3. `src/module_c_risk_score.py`의 `score()`에 `has_attachment`/`has_provisional_attachment`/`has_trust` 파라미터 추가 — 압류·가압류는 위험배수 ×5, 신탁은 ×2(논문에 없는 휴리스틱, 근거는 docstring에 명시: 압류·가압류는 이미 강제집행 절차 진입을 의미해 매우 강한 신호, 신탁은 명의자와 실질 처분권자 분리로 우선순위 판단이 복잡해짐).
+4. `report.py`: `--mortgage`를 필수에서 선택으로 변경, `--registry-pdf`(nargs="+", 토지·건물 등 여러 장 지원) 추가. 둘 중 하나도 없으면 `SystemExit`. `--registry-pdf` 사용 시 여러 PDF의 근저당을 합산하고 압류/가압류/신탁은 OR로 병합. 리포트 텍스트에 추출 결과와 "말소 서식 구분 못함/원본 대조 권장" 경고 출력, JSON에 `registry_extraction`(원본 배열)과 `inputs_used.mortgage_source`("manual"/"registry_pdf") 추가.
+
+### 검증
+- 이미 확보해둔 실제 등기부 PDF 2건(토지·건물, 둘 다 을구 "기록사항 없음")으로 종단 테스트: `mortgage_won=0, has_attachment=false, has_provisional_attachment=false, has_trust=false, ownership_transfer_count=2`(토지: 1985 소유권이전 + 2007 소유권경정, 건물: 1996 소유권보존 + 2007 소유권이전 — 둘 다 실제 갑구 이력과 정확히 일치) — 실제 값과 완전히 일치함을 확인.
+- `--registry-pdf`만 주고 `--mortgage` 생략 시 정상 동작, 반대로 둘 다 없으면 에러, `--registry-pdf`와 `--mortgage` 둘 다 주면 PDF값 우선하고 무시 안내 문구를 stderr에 출력하는 것 확인.
+- 레닥션 테스트: 원문에 있던 "이석재", "601121" 등이 레닥션 후 텍스트에서 사라짐을 문자열 검색으로 확인.
+- 다가구·구분등기 두 경로, `--mortgage` 방식 회귀 테스트 모두 통과.
+
+### 알려진 한계 (리포트에도 명시)
+- 말소(취소선) 서식은 pypdf 텍스트 추출로 구분이 안 돼, 이미 말소된 근저당/압류가 유효로 오추출될 위험이 있음 — 법적 판단에는 원본을 육안으로도 대조해야 함.
+- 압류·가압류·신탁 위험배수(×5, ×2)는 논문 기반이 아닌 휴리스틱.

@@ -5,9 +5,14 @@
 사용 예:
     python report.py --my-deposit 50000000 --mortgage 0                     # 시세 자동추정 시도
     python report.py --my-deposit 50000000 --mortgage 0 --market-price 250000000  # 시세 직접입력
+    python report.py --my-deposit 50000000 --registry-pdf 등기부_토지.pdf 등기부_건물.pdf --market-price 250000000
+        # --mortgage 대신 등기부 PDF를 넣으면 OpenAI가 근저당·압류·가압류·신탁을 자동 추출
 
 *** 현재 버전의 알려진 한계 ***
 - 근저당(등기부) 금액: CODEF 등기부 API가 사업자등록번호를 요구해서 --mortgage 인자로 직접 입력받는다.
+  --registry-pdf로 등기부 PDF를 주면 OpenAI가 대신 읽어서 근저당·압류·가압류·신탁·소유권이전이력을
+  추출한다(src/registry_parser.py). 이름·주민번호는 전송 전 정규식으로 레닥션하지만, 말소(취소선)
+  서식은 텍스트 추출로 구분이 안 되니 법적 판단에는 원본을 육안으로도 대조해야 한다.
 - 시세: --market-price 생략 시 매매 실거래 API(RTMSDataSvcSHTrade)로 유사 면적대 매매가 중앙값을
   자동 추정한다(2026-07-15 활용신청·승인 확인 완료). 표본이 부족한 지역/기간이면 실패할 수 있고,
   그 경우 --market-price로 직접 입력해야 한다.
@@ -47,6 +52,7 @@ from src.module_b_auction_sim import estimate_small_tenant_ratio, simulate_recov
 from src.module_c_risk_score import score
 from src.module_d_expected_loss import expected_loss
 from src.safety_info import cctv_summary
+from src.registry_parser import extract_registry_info
 # [E] 금융상품 추천(module_e_recommendation)은 일단 리포트 범위에서 제외 — 직방 대응 진단
 # 리포트(기본진단+다가구특별진단)부터 먼저 완성하기로 함. 모듈 파일 자체는 남겨둠.
 
@@ -178,7 +184,12 @@ def parse_args():
     p.add_argument("--ji", default="0007")
     p.add_argument("--dong-name", default="우만동")
     p.add_argument("--my-deposit", type=int, required=True, help="내 보증금 (원)")
-    p.add_argument("--mortgage", type=int, required=True, help="근저당 금액 (원, 등기부 확인값 직접 입력)")
+    p.add_argument("--mortgage", type=int, default=None,
+                    help="근저당 금액 (원, 등기부 확인값 직접 입력). --registry-pdf를 쓰면 생략 가능")
+    p.add_argument("--registry-pdf", nargs="+", default=None,
+                    help="등기사항전부증명서 PDF 경로(토지·건물 여러 장 가능). "
+                         "OpenAI로 근저당·압류·가압류·신탁·소유권이전이력을 자동 추출해 --mortgage 대신 사용한다. "
+                         "말소(취소선) 서식은 텍스트 추출로 구분 안 되니 원본을 육안으로도 대조할 것")
     p.add_argument("--market-price", type=int, default=None,
                     help="건물 시세 추정치 (원). 생략하면 매매 실거래 API로 자동 추정 시도, 실패 시 에러로 직접 입력 요청")
     p.add_argument("--known-tenants", type=int, default=0,
@@ -214,6 +225,23 @@ def main():
             (int(v) for v in (building.get("hoCnt"), building.get("hhldCnt")) if v and v.isdigit() and int(v) > 0),
             1,
         )
+
+    # 1b. 근저당·압류·가압류·신탁 — --mortgage 수동 입력 또는 --registry-pdf(LLM 자동추출) 중 택1
+    has_attachment = has_provisional_attachment = has_trust = False
+    registry_extractions = None
+    if args.registry_pdf:
+        registry_extractions = [extract_registry_info(p) for p in args.registry_pdf]
+        mortgage_won = sum(r["mortgage_won"] for r in registry_extractions)
+        has_attachment = any(r["has_attachment"] for r in registry_extractions)
+        has_provisional_attachment = any(r["has_provisional_attachment"] for r in registry_extractions)
+        has_trust = any(r["has_trust"] for r in registry_extractions)
+        if args.mortgage is not None:
+            print(f"(--registry-pdf가 있어 --mortgage 수동값({args.mortgage}원)은 무시하고 "
+                  f"PDF 추출값({mortgage_won}원)을 사용합니다)", file=sys.stderr)
+    elif args.mortgage is not None:
+        mortgage_won = args.mortgage
+    else:
+        raise SystemExit("근저당 정보가 없습니다. --mortgage로 직접 입력하거나 --registry-pdf로 등기부 PDF를 지정해주세요.")
 
     # 2. 호별 면적 (fallback 여부만 기록, 이번 버전 리포트에는 참고용으로만 노출)
     areas, area_is_fallback = get_unit_areas(args.sigungu, args.bjdong, args.bun, args.ji)
@@ -280,7 +308,7 @@ def main():
     recovery = simulate_recovery(
         my_deposit_won=args.my_deposit,
         market_price_won=market_price_won,
-        mortgage_won=args.mortgage,
+        mortgage_won=mortgage_won,
         priority_deposits_manwon=priority_sim,
         n_prior=max(n_units - 1, 0) if is_multi_household else 0,
         small_tenant_ratio=small_ratio,
@@ -292,10 +320,13 @@ def main():
 
     # 6. [C] 사고 확률 (규칙 기반 스코어링)
     c_result = score(
-        mortgage_won=args.mortgage,
+        mortgage_won=mortgage_won,
         priority_deposit_mean_won=a_summary["mean"],
         my_deposit_won=args.my_deposit,
         market_price_won=market_price_won,
+        has_attachment=has_attachment,
+        has_provisional_attachment=has_provisional_attachment,
+        has_trust=has_trust,
     )
 
     # 7. [D] 기대손실
@@ -310,19 +341,21 @@ def main():
         result = build_result_dict(building, n_units, areas, area_is_fallback, dong_expanded,
                                     a_summary, market_ref, c_result, b_summary, loss,
                                     build_year, args, market_price_won, market_price_source,
-                                    is_multi_household, summary, summary_source, safety_ref)
+                                    is_multi_household, summary, summary_source, safety_ref,
+                                    mortgage_won, registry_extractions)
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
         print_report(building, n_units, areas, area_is_fallback, dong_expanded,
                      a_summary, b_summary, c_result, loss, args, market_ref,
                      market_price_won, market_price_source, is_multi_household,
-                     summary, summary_source, safety_ref)
+                     summary, summary_source, safety_ref, mortgage_won, registry_extractions)
 
 
 def build_result_dict(building, n_units, areas, area_is_fallback, dong_expanded,
                        a_summary, market_ref, c_result, b_summary, loss,
                        build_year, args, market_price_won, market_price_source,
-                       is_multi_household, summary, summary_source, safety_ref):
+                       is_multi_household, summary, summary_source, safety_ref,
+                       mortgage_won, registry_extractions):
     """README.md '입력/출력 스키마' 절과 동일한 구조로 결과를 조립한다."""
     market_ref_out = {
         "area_band": market_ref["band"],
@@ -365,9 +398,11 @@ def build_result_dict(building, n_units, areas, area_is_fallback, dong_expanded,
         "module_b": b_summary,
         "module_d": {"expected_loss_won": loss},
         "summary_opinion": {"text": summary, "source": summary_source},
+        "registry_extraction": registry_extractions,  # --registry-pdf 사용 시 LLM 추출 원본 결과들, 아니면 null
         "inputs_used": {
             "my_deposit_won": args.my_deposit,
-            "mortgage_won": args.mortgage,
+            "mortgage_won": mortgage_won,
+            "mortgage_source": "registry_pdf" if args.registry_pdf else "manual",
             "market_price_won": market_price_won,
             "market_price_source": market_price_source,
             "known_tenants": args.known_tenants,
@@ -523,7 +558,7 @@ def print_safety_reference(safety_ref, dong_name):
 def print_report(building, n_units, areas, area_is_fallback, dong_expanded,
                   a_summary, b_summary, c_result, loss, args, market_ref,
                   market_price_won, market_price_source, is_multi_household,
-                  summary, summary_source, safety_ref):
+                  summary, summary_source, safety_ref, mortgage_won, registry_extractions):
     print("=" * 60)
     print(f"[기본 진단] {building.get('platPlc', '')}")
     print("=" * 60)
@@ -534,6 +569,12 @@ def print_report(building, n_units, areas, area_is_fallback, dong_expanded,
         print(f"  호별 면적       : 전유부 없음 → 층별개요 {len(areas)}건으로 대체 (균등분할 아님, 층별 면적)")
     else:
         print(f"  호별 면적       : 전유부 {len(areas)}건 확인됨")
+
+    if registry_extractions:
+        print(f"\n  [등기부 자동분석 — OpenAI가 PDF {len(registry_extractions)}건에서 추출, 말소 서식은 구분 못함/원본 대조 권장]")
+        print(f"    근저당 합계 {_man(mortgage_won)}원 / 압류 {'있음' if c_result['has_attachment'] else '없음'} "
+              f"/ 가압류 {'있음' if c_result['has_provisional_attachment'] else '없음'} "
+              f"/ 신탁 {'있음' if c_result['has_trust'] else '없음'}")
 
     if is_multi_household:
         print("\n" + "━" * 60)
@@ -583,12 +624,17 @@ def print_report(building, n_units, areas, area_is_fallback, dong_expanded,
 
     print("\n" + "=" * 60)
     price_note = "자동추정(매매 실거래 API)" if market_price_source == "auto_trade_api" else "사용자 직접입력"
-    print(f"한계: 근저당·국세체납은 사용자 입력값(등기부·납세증명서 미연동), 시세는 {price_note}({_man(market_price_won)}원).")
+    mortgage_note = "등기부 PDF 자동추출(OpenAI)" if registry_extractions else "사용자 입력값(등기부 미연동)"
+    print(f"한계: 근저당은 {mortgage_note}, 국세체납은 사용자 입력값(납세증명서 미연동), 시세는 {price_note}({_man(market_price_won)}원).")
     print("낙찰가율은 경기 연립·다세대 평균치로 근사, 사고확률은 학습된 분류기가 아닌 규칙기반")
     print("스코어링입니다.")
     if is_multi_household:
         print("선순위 보증금(A모듈)은 학습된 QRF 모델 기반이며, 90㎡ 이상 고가 세대가 섞인")
         print("건물은 추정치가 보수적(과소)일 수 있습니다 (docs/모델_해석.md 참고).")
+    if registry_extractions:
+        print("등기부 자동분석은 LLM이 텍스트를 읽어 추출한 값이라 오류 가능성이 있고, 특히")
+        print("말소(취소선) 서식은 인식하지 못해 이미 말소된 권리를 유효로 오추출할 수 있습니다.")
+        print("법적 판단에는 반드시 원본 등기부를 직접 육안으로도 대조하세요.")
     print("=" * 60)
 
 
